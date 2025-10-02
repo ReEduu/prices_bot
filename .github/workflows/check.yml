@@ -2,7 +2,7 @@ name: Daily Ticketmaster Price Check
 
 on:
   schedule:
-    - cron: "0 14 * * *"   # 09:00 CDMX
+    - cron: "0 14 * * *"      # 09:00 CDMX
   workflow_dispatch:
 
 permissions:
@@ -12,37 +12,36 @@ jobs:
   run:
     runs-on: self-hosted
 
-    env:
-      HOME: /Users/joseduardohdz
-      RUNNER_TOOL_CACHE: /Users/joseduardohdz/.cache/hostedtoolcache
-      AGENT_TOOLSDIRECTORY: /Users/joseduardohdz/.cache/hostedtoolcache
-      RUNNER_TEMP: /Users/joseduardohdz/.cache/tmp
-
     steps:
       - uses: actions/checkout@v4
 
-      - name: Prepare tool cache dirs
+      # Debug: imprime entorno básico del runner
+      - name: Print env
         run: |
-          mkdir -p "$RUNNER_TOOL_CACHE" "$RUNNER_TEMP"
-          echo "Tool cache: $RUNNER_TOOL_CACHE"
-          echo "Temp:       $RUNNER_TEMP"
+          echo "whoami: $(whoami)"
+          echo "pwd: $(pwd)"
+          echo "HOME: $HOME"
+          which python3 || true
+          python3 -V || true
 
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
-
-      - name: Install deps
+      # Crea y activa venv con el Python del sistema
+      - name: Create venv
         run: |
+          python3 -m venv .venv
+          source .venv/bin/activate
+          python -V
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-          python -m playwright install --with-deps chromium
+          # En macOS no hace falta --with-deps
+          python -m playwright install chromium
 
       - name: Run checker
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID:  ${{ secrets.TELEGRAM_CHAT_ID }}
-        run: python check_prices.py
+        run: |
+          source .venv/bin/activate
+          python check_prices.py
 
       - name: Upload debug artifacts
         if: always()
@@ -61,6 +60,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add prices.json
