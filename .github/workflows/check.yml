@@ -29,7 +29,20 @@ jobs:
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID:  ${{ secrets.TELEGRAM_CHAT_ID }}
+          DeBUG: "1"
         run: python check_prices.py
+
+      - name: Upload debug artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: debug-artifacts
+          path: |
+            debug_*.html
+            debug_*.png
+            prices.json
+          if-no-files-found: ignore
+
 
       - name: Commit state (prices.json)
         env:
