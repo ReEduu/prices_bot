@@ -1,9 +1,9 @@
 name: Daily Ticketmaster Price Check
-
 on:
   schedule:
-    - cron: "0 14 * * *"   # 09:00 America/Mexico_City ≈ 14:00 UTC
+    - cron: "0 14 * * *"
   workflow_dispatch:
+
 
 jobs:
   run:
