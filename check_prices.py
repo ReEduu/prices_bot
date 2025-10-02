@@ -1,4 +1,4 @@
-# check_prices.py  — V2 (por sección) + siempre notifica por Telegram
+# check_prices.py — V2.1 (debug + artefactos + robustez carga)
 import json, re, os, sys, time, math
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -6,6 +6,7 @@ import requests
 from playwright.sync_api import sync_playwright
 
 STATE = Path("prices.json")
+DEBUG = os.getenv("DEBUG", "0") == "1"
 
 # ---------- Estado ----------
 def load_state() -> Dict[str, Dict[str, float]]:
@@ -22,11 +23,7 @@ def notify_telegram(message: str):
         print("Telegram no configurado (faltan TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID).")
         return
     url = f"https://api.telegram.org/bot{token}/sendMessage"
-    data = {
-        "chat_id": chat_id,
-        "text": message,
-        "disable_web_page_preview": True,
-    }
+    data = {"chat_id": chat_id, "text": message, "disable_web_page_preview": True}
     try:
         r = requests.post(url, data=data, timeout=25)
         r.raise_for_status()
@@ -44,66 +41,88 @@ def parse_money_to_float(s: str) -> Optional[float]:
         return None
 
 def normalize_section_name(s: str) -> str:
-    # Limpia "Section " y dobles espacios; deja mayúsculas.
     s = re.sub(r"^\s*Section\s+", "", s, flags=re.IGNORECASE)
     s = re.sub(r"\s+", " ", s).strip()
     return s.upper()
 
-# ---------- Extracción por sección ----------
-def extract_sections_and_prices_from_html(html_text: str) -> Dict[str, float]:
-    """
-    Estrategia robusta:
-      1) Busca bloques que contengan 'Section <NOMBRE>' cerca de un precio 'MX$...'.
-      2) Empareja sección -> primer precio encontrado en el bloque.
-    """
-    results: Dict[str, float] = {}
+def slugify(url: str) -> str:
+    base = re.sub(r"[^a-zA-Z0-9]+", "-", url.split("/")[-1]).strip("-")
+    return base or "event"
 
-    # Heurística: split por 'Section ' para aislar tarjetas/entradas
+# ---------- Extracción ----------
+def extract_sections_and_prices_from_html(html_text: str) -> Dict[str, float]:
+    results: Dict[str, float] = {}
     parts = re.split(r"(?i)(?=Section\s+)", html_text)
     for part in parts:
-        # nombre de sección
         msec = re.search(r"(?i)Section\s+([A-Za-zÁÉÍÓÚÜÑ0-9\s\-\/]+?)\b", part)
         if not msec:
             continue
         section = normalize_section_name(msec.group(1))
-
-        # precio más cercano
         mp = re.search(MONEY, part)
         if not mp:
             continue
         price_val = parse_money_to_float(mp.group(0))
         if price_val is None:
             continue
-
-        # Guarda el menor precio visto para la sección (Lowest Price tab)
         if section not in results or price_val < results[section]:
             results[section] = price_val
-
     return results
 
 def fetch_sections_prices(pw, url: str) -> Dict[str, float]:
     browser = pw.chromium.launch()
     ctx = browser.new_context(
         locale="es-MX",
-        user_agent=(
-            "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 "
-            "(KHTML, like Gecko) Chrome/126.0.0.0 Mobile Safari/537.36"
-        ),
-        extra_http_headers={"Accept-Language": "es-MX,es;q=0.9"}
+        user_agent=("Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 "
+                    "(KHTML, like Gecko) Chrome/126.0.0.0 Mobile Safari/537.36"),
+        extra_http_headers={"Accept-Language": "es-MX,es;q=0.9"},
     )
     page = ctx.new_page()
-    page.goto(url, wait_until="load", timeout=120_000)
-    time.sleep(6)  # deja hidratar la SPA
+    page.goto(url, wait_until="networkidle", timeout=120_000)
 
-    # Captura HTML completo (incluye texto visible + JSON embebido)
+    # Intenta aceptar cookies si aparece
+    for sel in [
+        'button:has-text("Accept")', 'button:has-text("Aceptar")',
+        'text=/Accept all|Aceptar todas/i'
+    ]:
+        try:
+            page.locator(sel).first.click(timeout=2000)
+            break
+        except:
+            pass
+
+    # Asegurar pestaña Lowest Price
+    for sel in ['text=Lowest Price', 'text=Más barato', 'text=Precio más bajo']:
+        try:
+            page.locator(sel).first.click(timeout=1500)
+            break
+        except:
+            pass
+
+    # Dar tiempo a hidratar y hacer scroll para cargar listas perezosas
+    page.wait_for_timeout(2000)
+    for _ in range(8):
+        try:
+            page.mouse.wheel(0, 2000)
+        except:
+            pass
+        page.wait_for_timeout(500)
+
     html = page.content()
-    ctx.close(); browser.close()
 
+    # Artefactos debug
+    if DEBUG:
+        base = slugify(url)
+        try:
+            page.screenshot(path=f"debug_{base}.png", full_page=True)
+        except:
+            pass
+        Path(f"debug_{base}.html").write_text(html, encoding="utf-8")
+
+    ctx.close(); browser.close()
     return extract_sections_and_prices_from_html(html)
 
 # ---------- Diff ----------
-def diff_prices(old: Dict[str, float], new: Dict[str, float]) -> Tuple[List[str], List[str], List[str]]:
-    """Devuelve (subidas, bajadas, nuevas/eliminadas) como mensajes ya formateados."""
+def diff_prices(old: Dict[str, float], new: Dict[str, float]):
     ups, downs, others = [], [], []
     all_sections = sorted(set(old.keys()) | set(new.keys()))
     for sec in all_sections:
@@ -131,41 +150,44 @@ def main():
     daily_reports: List[str] = []
 
     from datetime import datetime, timezone
-    now = datetime.now(timezone.utc).astimezone()  # hora local del runner
+    now = datetime.now(timezone.utc).astimezone()
     date_str = now.strftime("%Y-%m-%d %H:%M")
 
     with sync_playwright() as pw:
         for url in urls:
-            print(f"Revisando {url} …")
+            print(f"\n=== Revisando {url} ===")
             sections = fetch_sections_prices(pw, url)
+
+            # LOG visible en consola SIEMPRE
+            print(f"Secciones detectadas: {len(sections)}")
+            for sec, price in sorted(sections.items()):
+                print(f"  - {sec}: {price:.2f}")
+
             old_sections = prev_state.get(url, {})
             new_state[url] = sections
 
             ups, downs, others = diff_prices(old_sections, sections)
 
-            # Construye mensaje por URL (siempre)
-            if ups or downs or others or not old_sections:
-                header = f"🎟️ Cambios detectados ({date_str})\n{url}\n"
-                lines = []
-                if ups:   lines.append("⬆️ Subidas:\n" + "\n".join(ups))
-                if downs: lines.append("⬇️ Bajas:\n" + "\n".join(downs))
-                if others:lines.append("ℹ️ Novedades:\n" + "\n".join(others))
-                if not (ups or downs or others) and not old_sections:
-                    lines.append("Primer registro tomado. (No hay comparación previa)")
-                report = header + ("\n\n".join(lines))
-            else:
-                # Sin cambios -> resume precios actuales
-                header = f"✅ Sin cambios ({date_str})\n{url}\n"
-                current = "\n".join([f"• {sec}: {price:.2f}" for sec, price in sorted(sections.items())]) or "Sin precios detectados"
-                report = header + current
+            header = f"🎟️ Cambios detectados ({date_str})\n{url}\n"
+            lines = []
 
+            if ups:   lines.append("⬆️ Subidas:\n" + "\n".join(ups))
+            if downs: lines.append("⬇️ Bajas:\n" + "\n".join(downs))
+            if others:lines.append("ℹ️ Novedades:\n" + "\n".join(others))
+
+            # Siempre adjuntamos snapshot actual
+            snapshot = "\n".join([f"• {sec}: {price:.2f}" for sec, price in sorted(sections.items())]) or "Sin precios detectados"
+            if not (ups or downs or others):
+                lines.append("✅ Sin cambios respecto al registro previo.")
+            lines.append("Precios actuales:\n" + snapshot)
+
+            report = header + ("\n\n".join(lines))
             daily_reports.append(report)
 
     save_state(new_state)
-
-    # Telegram SIEMPRE (1 mensaje con todas las URLs)
+    # Notificación Telegram SIEMPRE
     notify_telegram("\n\n".join(daily_reports))
-    print("\n\n".join(daily_reports))
+    print("\n\n" + "\n\n".join(daily_reports) + "\n")
 
 if __name__ == "__main__":
     main()
