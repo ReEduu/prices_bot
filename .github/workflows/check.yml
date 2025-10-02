@@ -11,6 +11,13 @@ permissions:
 jobs:
   run:
     runs-on: self-hosted
+
+    env:
+      AGENT_TOOLSDIRECTORY: /Users/joseduardohdz/Documents/actions-runner/actions-runner/_work/_tool
+      RUNNER_TOOL_CACHE:    /Users/joseduardohdz/Documents/actions-runner/actions-runner/_work/_tool
+      RUNNER_TEMP:          /Users/joseduardohdz/Documents/actions-runner/actions-runner/_work/_temp
+
+
     steps:
       - uses: actions/checkout@v4
 
