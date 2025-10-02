@@ -1,20 +1,19 @@
 name: Daily Ticketmaster Price Check
+
 on:
   schedule:
-    - cron: "0 14 * * *"
+    - cron: "0 14 * * *"   # 09:00 CDMX
   workflow_dispatch:
 
 permissions:
   contents: write
 
-
 jobs:
   run:
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
@@ -29,7 +28,6 @@ jobs:
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID:  ${{ secrets.TELEGRAM_CHAT_ID }}
-          DeBUG: "1"
         run: python check_prices.py
 
       - name: Upload debug artifacts
@@ -38,11 +36,12 @@ jobs:
         with:
           name: debug-artifacts
           path: |
-            debug_*.html
             debug_*.png
+            debug_*.html
+            debug_*_text.txt
+            trace_*.zip
             prices.json
-          if-no-files-found: ignore
-
+          if-no-files-found: warn
 
       - name: Commit state (prices.json)
         env:
@@ -53,4 +52,3 @@ jobs:
           git add prices.json
           git commit -m "Update prices state [skip ci]" || echo "No changes"
           git push
-

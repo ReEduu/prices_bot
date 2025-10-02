@@ -1,4 +1,4 @@
-# check_prices.py — V2.1 (debug + artefactos + robustez carga)
+# check_prices.py — V2.2 forense: screenshot + html + body_text + trace
 import json, re, os, sys, time, math
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -6,7 +6,7 @@ import requests
 from playwright.sync_api import sync_playwright
 
 STATE = Path("prices.json")
-DEBUG = os.getenv("DEBUG", "0") == "1"
+DEBUG = True  # fuerza debug SIEMPRE por ahora
 
 # ---------- Estado ----------
 def load_state() -> Dict[str, Dict[str, float]]:
@@ -20,7 +20,7 @@ def notify_telegram(message: str):
     token = os.getenv("TELEGRAM_BOT_TOKEN")
     chat_id = os.getenv("TELEGRAM_CHAT_ID")
     if not token or not chat_id:
-        print("Telegram no configurado (faltan TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID).")
+        print("Telegram no configurado.")
         return
     url = f"https://api.telegram.org/bot{token}/sendMessage"
     data = {"chat_id": chat_id, "text": message, "disable_web_page_preview": True}
@@ -49,10 +49,37 @@ def slugify(url: str) -> str:
     base = re.sub(r"[^a-zA-Z0-9]+", "-", url.split("/")[-1]).strip("-")
     return base or "event"
 
-# ---------- Extracción ----------
-def extract_sections_and_prices_from_html(html_text: str) -> Dict[str, float]:
+# ---------- Extracciones ----------
+def extract_from_text_blocks(text: str) -> Dict[str, float]:
+    """
+    Empareja líneas que contengan 'Section ...' y la línea de precio más cercana 'MX$...'
+    Funciona con body.inner_text() y con bloques visibles concatenados.
+    """
     results: Dict[str, float] = {}
-    parts = re.split(r"(?i)(?=Section\s+)", html_text)
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    for i, ln in enumerate(lines):
+        msec = re.search(r"(?i)^Section\s+([A-Za-zÁÉÍÓÚÜÑ0-9\s\-\/]+)", ln)
+        if not msec:
+            continue
+        sec = normalize_section_name(msec.group(1))
+        # busca precio en las siguientes 1-4 líneas
+        price_val = None
+        for j in range(1, 5):
+            if i + j >= len(lines):
+                break
+            mp = re.search(MONEY, lines[i + j])
+            if mp:
+                price_val = parse_money_to_float(mp.group(0))
+                if price_val is not None:
+                    break
+        if price_val is not None:
+            if sec not in results or price_val < results[sec]:
+                results[sec] = price_val
+    return results
+
+def extract_from_html(html: str) -> Dict[str, float]:
+    results: Dict[str, float] = {}
+    parts = re.split(r"(?i)(?=Section\s+)", html)
     for part in parts:
         msec = re.search(r"(?i)Section\s+([A-Za-zÁÉÍÓÚÜÑ0-9\s\-\/]+?)\b", part)
         if not msec:
@@ -72,17 +99,24 @@ def fetch_sections_prices(pw, url: str) -> Dict[str, float]:
     browser = pw.chromium.launch()
     ctx = browser.new_context(
         locale="es-MX",
-        user_agent=("Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 "
-                    "(KHTML, like Gecko) Chrome/126.0.0.0 Mobile Safari/537.36"),
-        extra_http_headers={"Accept-Language": "es-MX,es;q=0.9"},
+        user_agent=("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                    "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"),
+        extra_http_headers={"Accept-Language": "es-MX,es;q=0.9,en;q=0.8"},
     )
+
+    # --- TRACING para inspección posterior ---
+    try:
+        ctx.tracing.start(screenshots=True, snapshots=True, sources=True)
+    except:
+        pass
+
     page = ctx.new_page()
     page.goto(url, wait_until="networkidle", timeout=120_000)
 
-    # Intenta aceptar cookies si aparece
+    # Cookies
     for sel in [
-        'button:has-text("Accept")', 'button:has-text("Aceptar")',
-        'text=/Accept all|Aceptar todas/i'
+        'button:has-text("Aceptar")', 'button:has-text("Accept")',
+        'text=/Aceptar todas|Accept all/i'
     ]:
         try:
             page.locator(sel).first.click(timeout=2000)
@@ -90,7 +124,7 @@ def fetch_sections_prices(pw, url: str) -> Dict[str, float]:
         except:
             pass
 
-    # Asegurar pestaña Lowest Price
+    # Pestaña Lowest Price
     for sel in ['text=Lowest Price', 'text=Más barato', 'text=Precio más bajo']:
         try:
             page.locator(sel).first.click(timeout=1500)
@@ -98,28 +132,68 @@ def fetch_sections_prices(pw, url: str) -> Dict[str, float]:
         except:
             pass
 
-    # Dar tiempo a hidratar y hacer scroll para cargar listas perezosas
-    page.wait_for_timeout(2000)
-    for _ in range(8):
+    # Scroll para hidratar (varias veces por si hay virtualización)
+    page.wait_for_timeout(1500)
+    for _ in range(12):
         try:
-            page.mouse.wheel(0, 2000)
+            page.mouse.wheel(0, 1800)
         except:
             pass
-        page.wait_for_timeout(500)
+        page.wait_for_timeout(300)
 
+    # 1) Texto visible de todo el body
+    body_text = ""
+    try:
+        body_text = page.locator("body").inner_text(timeout=4000)
+    except:
+        pass
+
+    # 2) HTML completo
     html = page.content()
 
-    # Artefactos debug
-    if DEBUG:
-        base = slugify(url)
-        try:
-            page.screenshot(path=f"debug_{base}.png", full_page=True)
-        except:
-            pass
-        Path(f"debug_{base}.html").write_text(html, encoding="utf-8")
+    # 3) Locators de tarjetas visibles (fallback)
+    card_texts = []
+    try:
+        # Graba los <li> o tarjetas que contengan 'Section' (en mobile suele estar así)
+        cards = page.locator("li:has-text('Section')").all()
+        if not cards:
+            cards = page.locator(":text('Section')").all()
+        for el in cards:
+            try:
+                t = el.inner_text(timeout=0)
+                if t:
+                    card_texts.append(t)
+            except:
+                pass
+    except:
+        pass
+
+    # --- Artefactos ---
+    base = slugify(url)
+    try:
+        page.screenshot(path=f"debug_{base}.png", full_page=True)
+    except:
+        pass
+    Path(f"debug_{base}.html").write_text(html, encoding="utf-8")
+    Path(f"debug_{base}_text.txt").write_text(body_text + "\n\n" + "\n\n---CARDS---\n\n" + "\n\n".join(card_texts), encoding="utf-8")
+    try:
+        ctx.tracing.stop(path=f"trace_{base}.zip")
+    except:
+        pass
+
+    # --- Parseo combinado ---
+    results = {}
+    # a) por el texto visible
+    a = extract_from_text_blocks(body_text + "\n\n" + "\n\n".join(card_texts))
+    results.update(a)
+    # b) por el HTML directo
+    b = extract_from_html(html)
+    for k, v in b.items():
+        if k not in results or v < results[k]:
+            results[k] = v
 
     ctx.close(); browser.close()
-    return extract_sections_and_prices_from_html(html)
+    return results
 
 # ---------- Diff ----------
 def diff_prices(old: Dict[str, float], new: Dict[str, float]):
@@ -145,7 +219,7 @@ def main():
     if not urls:
         print("urls.txt vacío"); sys.exit(0)
 
-    prev_state = load_state()  # {url: {section: price}}
+    prev_state = load_state()
     new_state: Dict[str, Dict[str, float]] = dict(prev_state)
     daily_reports: List[str] = []
 
@@ -158,7 +232,6 @@ def main():
             print(f"\n=== Revisando {url} ===")
             sections = fetch_sections_prices(pw, url)
 
-            # LOG visible en consola SIEMPRE
             print(f"Secciones detectadas: {len(sections)}")
             for sec, price in sorted(sections.items()):
                 print(f"  - {sec}: {price:.2f}")
@@ -167,25 +240,18 @@ def main():
             new_state[url] = sections
 
             ups, downs, others = diff_prices(old_sections, sections)
-
             header = f"🎟️ Cambios detectados ({date_str})\n{url}\n"
             lines = []
-
             if ups:   lines.append("⬆️ Subidas:\n" + "\n".join(ups))
             if downs: lines.append("⬇️ Bajas:\n" + "\n".join(downs))
             if others:lines.append("ℹ️ Novedades:\n" + "\n".join(others))
-
-            # Siempre adjuntamos snapshot actual
             snapshot = "\n".join([f"• {sec}: {price:.2f}" for sec, price in sorted(sections.items())]) or "Sin precios detectados"
             if not (ups or downs or others):
                 lines.append("✅ Sin cambios respecto al registro previo.")
             lines.append("Precios actuales:\n" + snapshot)
-
-            report = header + ("\n\n".join(lines))
-            daily_reports.append(report)
+            daily_reports.append(header + ("\n\n".join(lines)))
 
     save_state(new_state)
-    # Notificación Telegram SIEMPRE
     notify_telegram("\n\n".join(daily_reports))
     print("\n\n" + "\n\n".join(daily_reports) + "\n")
 
