@@ -13,17 +13,24 @@ jobs:
     runs-on: self-hosted
 
     env:
-      AGENT_TOOLSDIRECTORY: /Users/joseduardohdz/Documents/actions-runner/actions-runner/_work/_tool
-      RUNNER_TOOL_CACHE:    /Users/joseduardohdz/Documents/actions-runner/actions-runner/_work/_tool
-      RUNNER_TEMP:          /Users/joseduardohdz/Documents/actions-runner/actions-runner/_work/_temp
-
+      HOME: /Users/joseduardohdz
+      RUNNER_TOOL_CACHE: /Users/joseduardohdz/.cache/hostedtoolcache
+      AGENT_TOOLSDIRECTORY: /Users/joseduardohdz/.cache/hostedtoolcache
+      RUNNER_TEMP: /Users/joseduardohdz/.cache/tmp
 
     steps:
       - uses: actions/checkout@v4
 
+      - name: Prepare tool cache dirs
+        run: |
+          mkdir -p "$RUNNER_TOOL_CACHE" "$RUNNER_TEMP"
+          echo "Tool cache: $RUNNER_TOOL_CACHE"
+          echo "Temp:       $RUNNER_TEMP"
+
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+
 
       - name: Install deps
         run: |
