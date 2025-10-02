@@ -50,65 +50,113 @@ def slugify(url: str) -> str:
     return base or "event"
 
 # ---------- Extracciones ----------
+# Reconoce nombres de sección típicos (puedes añadir más)
+SECTION_PREFIXES = [
+    r"GENERAL(?:\s+[A-Z0-9]+)?",
+    r"GRADA(?:\s+(?:ORIENTE|PONIENTE|NORTE|SUR|A|B|C))?",
+    r"VIP", r"PLATEA", r"PREFERENTE", r"CANCHA", r"PALCO", r"BUTACA",
+]
+
+MONEY = r"(?:MXN|MX\$|\$)\s?\d{1,3}(?:[.,]\d{3})*(?:[.,]\d{2})?"
+
 def extract_from_text_blocks(text: str) -> Dict[str, float]:
     """
-    Empareja líneas que contengan 'Section ...' y la línea de precio más cercana 'MX$...'
-    Funciona con body.inner_text() y con bloques visibles concatenados.
+    Solo trabaja con TEXTO VISIBLE (body.inner_text y tarjetas),
+    nada de HTML/atributos. Empareja líneas de sección y líneas con precio.
     """
     results: Dict[str, float] = {}
     lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
-    for i, ln in enumerate(lines):
-        msec = re.search(r"(?i)^Section\s+([A-Za-zÁÉÍÓÚÜÑ0-9\s\-\/]+)", ln)
-        if not msec:
-            continue
-        sec = normalize_section_name(msec.group(1))
-        # busca precio en las siguientes 1-4 líneas
-        price_val = None
-        for j in range(1, 5):
-            if i + j >= len(lines):
-                break
-            mp = re.search(MONEY, lines[i + j])
-            if mp:
-                price_val = parse_money_to_float(mp.group(0))
-                if price_val is not None:
+    # Normaliza tildes para búsquedas robustas (opcional)
+    norm = [re.sub(r"\s+", " ", ln).upper() for ln in lines]
+
+    # 1) Caso explícito: líneas que empiezan con 'SECTION ' o 'SECCIÓN '
+    for i, ln in enumerate(norm):
+        msec = re.match(r"^(SECTION|SECCIÓN)\s+([A-Z0-9ÁÉÍÓÚÜÑ\-/ ]{1,40})$", ln, flags=re.IGNORECASE)
+        if msec:
+            sec = msec.group(2).strip()
+            # busca precio en siguientes 1-4 líneas visibles
+            price_val = None
+            for j in range(1, 5):
+                if i + j >= len(norm):
                     break
-        if price_val is not None:
-            if sec not in results or price_val < results[sec]:
-                results[sec] = price_val
+                mp = re.search(MONEY, lines[i + j], flags=re.IGNORECASE)
+                if mp:
+                    price_val = parse_money_to_float(mp.group(0))
+                    if price_val is not None:
+                        break
+            if price_val is not None:
+                sec = normalize_section_name(sec)
+                if sec not in results or price_val < results[sec]:
+                    results[sec] = price_val
+
+    # 2) Caso implícito: líneas que parecen un nombre de sección sin la palabra "Section/Sección"
+    sec_regex = re.compile(rf"^({'|'.join(SECTION_PREFIXES)})\b", flags=re.IGNORECASE)
+    for i, ln in enumerate(norm):
+        if sec_regex.search(ln):
+            sec = normalize_section_name(lines[i])
+            # busca precio cercano (misma línea o siguientes 1-4)
+            price_val = None
+            # misma línea
+            mp0 = re.search(MONEY, lines[i], flags=re.IGNORECASE)
+            if mp0:
+                price_val = parse_money_to_float(mp0.group(0))
+            # siguientes líneas
+            if price_val is None:
+                for j in range(1, 5):
+                    if i + j >= len(norm):
+                        break
+                    mp = re.search(MONEY, lines[i + j], flags=re.IGNORECASE)
+                    if mp:
+                        price_val = parse_money_to_float(mp.group(0))
+                        if price_val is not None:
+                            break
+            if price_val is not None:
+                if sec not in results or price_val < results[sec]:
+                    results[sec] = price_val
+
     return results
 
 def extract_from_html(html: str) -> Dict[str, float]:
+    """
+    Filtro súper restrictivo para evitar capturar atributos aria-*.
+    Solo usa HTML como ÚLTIMO recurso:
+    - Requiere >Section ...< en texto (entre etiquetas).
+    """
     results: Dict[str, float] = {}
-    parts = re.split(r"(?i)(?=Section\s+)", html)
-    for part in parts:
-        msec = re.search(r"(?i)Section\s+([A-Za-zÁÉÍÓÚÜÑ0-9\s\-\/]+?)\b", part)
+
+    # Busca '>' Section ... '<' para asegurar que es texto visible dentro de un nodo
+    for m in re.finditer(r">([^<]*\b(Section|Sección)\s+[A-Za-zÁÉÍÓÚÜÑ0-9\-/ ]{1,40}[^<]*)<", html, flags=re.IGNORECASE):
+        chunk = m.group(1)
+        msec = re.search(r"(?i)(Section|Sección)\s+([A-Za-zÁÉÍÓÚÜÑ0-9\-/ ]{1,40})", chunk)
         if not msec:
             continue
-        section = normalize_section_name(msec.group(1))
-        mp = re.search(MONEY, part)
+        sec = normalize_section_name(msec.group(2))
+        # precio cercano en el mismo fragmento (o poco después en el HTML)
+        window = html[m.start(): m.end() + 400]  # ventanita corta para buscar precio
+        mp = re.search(MONEY, window, flags=re.IGNORECASE)
         if not mp:
             continue
         price_val = parse_money_to_float(mp.group(0))
         if price_val is None:
             continue
-        if section not in results or price_val < results[section]:
-            results[section] = price_val
+        if sec not in results or price_val < results[sec]:
+            results[sec] = price_val
+
     return results
 
+
 def fetch_sections_prices(pw, url: str) -> Dict[str, float]:
-    browser = pw.chromium.launch()
-    ctx = browser.new_context(
+    user_data_dir = ".pw-session"
+
+    ctx = pw.chromium.launch_persistent_context(
+        user_data_dir,
+        headless=True,   # <— pon False la primera vez para ver el navegador
         locale="es-MX",
         user_agent=("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
                     "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"),
         extra_http_headers={"Accept-Language": "es-MX,es;q=0.9,en;q=0.8"},
     )
 
-    # --- TRACING para inspección posterior ---
-    try:
-        ctx.tracing.start(screenshots=True, snapshots=True, sources=True)
-    except:
-        pass
 
     page = ctx.new_page()
     page.goto(url, wait_until="networkidle", timeout=120_000)
@@ -192,7 +240,7 @@ def fetch_sections_prices(pw, url: str) -> Dict[str, float]:
         if k not in results or v < results[k]:
             results[k] = v
 
-    ctx.close(); browser.close()
+    ctx.close(); 
     return results
 
 # ---------- Diff ----------

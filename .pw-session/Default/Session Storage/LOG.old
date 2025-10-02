@@ -1,0 +1,8 @@
+2025/10/02-16:58:02.058 c4b32 Reusing MANIFEST /Users/joseduardohdz/Documents/price-bot/.pw-session/Default/Session Storage/MANIFEST-000001
+2025/10/02-16:58:02.059 c4b32 Recovering log #4
+2025/10/02-16:58:02.059 c4b32 Level-0 table #6: started
+2025/10/02-16:58:02.063 c4b32 Level-0 table #6: 23915 bytes OK
+2025/10/02-16:58:02.064 c4b32 Recovering log #6
+2025/10/02-16:58:02.066 c4b32 Reusing old log /Users/joseduardohdz/Documents/price-bot/.pw-session/Default/Session Storage/000006.log 
+2025/10/02-16:58:02.068 c4b32 Delete type=0 #4
+2025/10/02-16:58:02.068 c4b32 Delete type=2 #7
