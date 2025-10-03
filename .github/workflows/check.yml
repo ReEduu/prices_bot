@@ -2,7 +2,7 @@ name: Daily Ticketmaster Price Check
 
 on:
   schedule:
-    - cron: "0 14 * * *"      # 09:00 CDMX
+    - cron: "*/30 * * * *"      # 09:00 CDMX
   workflow_dispatch:
 
 permissions:
